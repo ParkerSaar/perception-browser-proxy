@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import time
+import re
 
 app = Flask(__name__)
 
@@ -10,9 +11,16 @@ app = Flask(__name__)
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
 
-PERCEPTION_SESSION = os.environ.get('PERCEPTION_SESSION', '')
+PERCEPTION_USERNAME = os.environ.get('PERCEPTION_USERNAME', '')
+PERCEPTION_PASSWORD = os.environ.get('PERCEPTION_PASSWORD', '')
 API_KEY = os.environ.get('API_KEY', 'change_this_key')
 PERCEPTION_BASE = 'https://perception.cx'
+
+# Session storage
+session_data = {
+    'cookies': {},
+    'last_login': 0
+}
 
 cache = {}
 CACHE_TTL = 300
@@ -35,8 +43,87 @@ def get_cached(key):
 def set_cached(key, data):
     cache[key] = (data, time.time())
 
+def do_login():
+    """Login to perception.cx and get session cookies"""
+    print("Attempting login...")
+    
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+    })
+    
+    try:
+        # Step 1: Get the login page to find CSRF token
+        login_page = session.get(f"{PERCEPTION_BASE}/login/", timeout=10)
+        
+        if login_page.status_code != 200:
+            print(f"Failed to get login page: {login_page.status_code}")
+            return False
+        
+        soup = BeautifulSoup(login_page.text, 'html.parser')
+        
+        # Find CSRF token (XenForo uses _xfToken)
+        token_input = soup.select_one('input[name="_xfToken"]')
+        csrf_token = token_input.get('value', '') if token_input else ''
+        
+        # Also try to find it in other places
+        if not csrf_token:
+            token_match = re.search(r'_xfToken["\s:]+["\'](.*?)["\']', login_page.text)
+            if token_match:
+                csrf_token = token_match.group(1)
+        
+        print(f"CSRF Token found: {bool(csrf_token)}")
+        
+        # Step 2: Submit login form
+        login_data = {
+            'login': PERCEPTION_USERNAME,
+            'password': PERCEPTION_PASSWORD,
+            '_xfToken': csrf_token,
+            'remember': '1',
+            '_xfRedirect': f"{PERCEPTION_BASE}/"
+        }
+        
+        login_response = session.post(
+            f"{PERCEPTION_BASE}/login/login",
+            data=login_data,
+            timeout=10,
+            allow_redirects=True
+        )
+        
+        print(f"Login response status: {login_response.status_code}")
+        
+        # Check if login succeeded by looking for user elements
+        if 'logout' in login_response.text.lower() or 'avatar' in login_response.text.lower():
+            session_data['cookies'] = dict(session.cookies)
+            session_data['last_login'] = time.time()
+            print("Login successful!")
+            return True
+        
+        # Check for error messages
+        soup = BeautifulSoup(login_response.text, 'html.parser')
+        error = soup.select_one('.blockMessage--error, .error, [class*="error"]')
+        if error:
+            print(f"Login error: {error.get_text(strip=True)}")
+        
+        return False
+        
+    except Exception as e:
+        print(f"Login exception: {e}")
+        return False
+
+def ensure_logged_in():
+    """Make sure we have a valid session"""
+    # Re-login if no cookies or last login was over 30 minutes ago
+    if not session_data['cookies'] or (time.time() - session_data['last_login']) > 1800:
+        return do_login()
+    return True
+
 def fetch_perception(path):
-    cookies = {'xf_session': PERCEPTION_SESSION}
+    """Fetch a page from perception.cx with authentication"""
+    
+    if not ensure_logged_in():
+        return None
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
     }
@@ -44,11 +131,25 @@ def fetch_perception(path):
     try:
         resp = requests.get(
             f"{PERCEPTION_BASE}{path}",
-            cookies=cookies,
+            cookies=session_data['cookies'],
             headers=headers,
             timeout=10
         )
+        
+        # Check if we got logged out
+        if 'login' in resp.url and 'login' not in path:
+            print("Session expired, re-logging in...")
+            if do_login():
+                # Retry the request
+                resp = requests.get(
+                    f"{PERCEPTION_BASE}{path}",
+                    cookies=session_data['cookies'],
+                    headers=headers,
+                    timeout=10
+                )
+        
         return resp.text if resp.status_code == 200 else None
+        
     except Exception as e:
         print(f"Fetch error: {e}")
         return None
@@ -62,7 +163,8 @@ def index():
     return jsonify({
         'status': 'online',
         'service': 'Perception Browser Proxy',
-        'version': '1.0.0'
+        'version': '2.0.0',
+        'auth': 'login-based'
     })
 
 @app.route('/api/test')
@@ -70,23 +172,37 @@ def test_connection():
     if not check_api_key():
         return jsonify({'error': 'Invalid API key'}), 401
     
+    # Force a fresh login attempt
+    login_success = do_login()
+    
+    if not login_success:
+        return jsonify({
+            'success': False,
+            'error': 'Login failed',
+            'has_credentials': bool(PERCEPTION_USERNAME and PERCEPTION_PASSWORD)
+        })
+    
     html = fetch_perception('/')
     
     if html:
         soup = BeautifulSoup(html, 'html.parser')
         title = soup.select_one('title')
-        logged_in = len(soup.select('.p-navgroup--member, .username, [class*="avatar"]')) > 0
+        
+        # Check for logged-in indicators
+        user_el = soup.select_one('.p-navgroup--member .avatar, [class*="avatar"], .username')
+        logged_in = user_el is not None
         
         return jsonify({
             'success': True,
             'page_title': title.get_text(strip=True) if title else 'Unknown',
             'logged_in': logged_in,
-            'html_length': len(html)
+            'html_length': len(html),
+            'cookies_count': len(session_data['cookies'])
         })
     else:
         return jsonify({
             'success': False,
-            'error': 'Could not fetch perception.cx'
+            'error': 'Could not fetch perception.cx after login'
         })
 
 @app.route('/api/forums')
@@ -254,7 +370,7 @@ def get_news():
     return jsonify(result)
 
 # ═══════════════════════════════════════════════════════════════
-# VERCEL ENTRY POINT - This is the key part!
+# VERCEL ENTRY POINT
 # ═══════════════════════════════════════════════════════════════
 
 app = app

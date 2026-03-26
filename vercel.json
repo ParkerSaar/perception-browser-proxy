@@ -13,32 +13,3 @@
     }
   ]
 }
-```
-```
-4. Click "Commit changes" (green button)
-```
-
----
-
-**Step 4: Create `requirements.txt`**
-```
-1. Click "Add file" → "Create new file"
-2. Name it: requirements.txt
-3. Paste this content:
-```
-```
-flask==3.0.0
-requests==2.31.0
-beautifulsoup4==4.12.2
-```
-```
-4. Click "Commit changes"
-```
-
----
-
-**Step 5: Create `api/index.py`**
-```
-1. Click "Add file" → "Create new file"
-2. Name it: api/index.py (this creates the api folder automatically)
-3. Paste this ENTIRE content:

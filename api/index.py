@@ -37,7 +37,7 @@ def set_cached(key, data):
     cache[key] = (data, time.time())
 
 def fetch_perception(path):
-    cookies = {'session': PERCEPTION_SESSION}
+    cookies = {'xf_session': PERCEPTION_SESSION}
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
     }
